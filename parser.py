@@ -4,7 +4,6 @@ from typing import Optional
 
 
 def identify_report(file_bytes: BytesIO) -> str:
-    """Определяет тип отчёта по ключевым словам во всех листах."""
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
@@ -23,30 +22,14 @@ def identify_report(file_bytes: BytesIO) -> str:
     return 'unknown'
 
 
-def find_header_row(file_bytes: BytesIO, sheet_name: str, keyword: str) -> int:
-    """Находит строку с заголовками по ключевому слову."""
-    file_bytes.seek(0)
-    df = pd.read_excel(file_bytes, sheet_name=sheet_name, header=None)
-    
-    for i, row in df.iterrows():
-        row_str = ' '.join(str(v) for v in row.values if pd.notna(v))
-        if keyword in row_str:
-            return i
-    return -1
-
-
 def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     sheet = xl.sheet_names[0]
     
-    header = find_header_row(file_bytes, sheet, 'Артикул')
-    if header < 0:
-        print("Не найдена строка 'Артикул' в начислениях")
-        return None
-    
+    # В начислениях заголовки в строке 15 (индекс 14)
     file_bytes.seek(0)
-    df = pd.read_excel(file_bytes, sheet_name=sheet, header=header)
+    df = pd.read_excel(file_bytes, sheet_name=sheet, header=14)
     df = df.dropna(how='all')
     
     df_goods = df[df['Артикул'].notna()].copy()
@@ -84,21 +67,14 @@ def parse_stock(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
             sheet = s
             break
     if sheet is None:
-        print("Лист 'Товары' не найден")
         return None
     
-    header = find_header_row(file_bytes, sheet, 'Артикул')
-    if header < 0:
-        print(f"Не найдена строка 'Артикул' в листе {sheet}")
-        return None
-    
+    # Заголовки в строке 2 (индекс 1)
     file_bytes.seek(0)
-    df = pd.read_excel(file_bytes, sheet_name=sheet, header=header)
+    df = pd.read_excel(file_bytes, sheet_name=sheet, header=1)
     df = df.dropna(how='all')
     
     if 'Артикул' not in df.columns or 'Доступно к продаже' not in df.columns:
-        print(f"Нет нужных колонок в листе {sheet}")
-        print(f"Колонки: {df.columns.tolist()}")
         return None
     
     result = df[['Артикул', 'Доступно к продаже']].copy()
@@ -112,7 +88,6 @@ def parse_stock(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     result = result[result['Артикул'].notna()]
     result = result.groupby('Артикул').agg({'Остаток': 'sum', 'Продаж_в_день': 'sum'}).reset_index()
     
-    print(f"Остатки распарсены: {len(result)} товаров")
     return result
 
 
@@ -120,23 +95,20 @@ def parse_ads(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
-    # Ищем лист Statistics
     sheet = None
     for s in xl.sheet_names:
         if s == 'Statistics':
             sheet = s
             break
     if sheet is None:
-        print("Лист 'Statistics' не найден")
         return None
     
+    # Заголовки в строке 2 (индекс 1)
     file_bytes.seek(0)
-    df = pd.read_excel(file_bytes, sheet_name=sheet, header=0)
+    df = pd.read_excel(file_bytes, sheet_name=sheet, header=1)
     df = df.dropna(how='all')
     
     if 'SKU' not in df.columns or 'Расход, ₽' not in df.columns:
-        print(f"Нет нужных колонок в листе {sheet}")
-        print(f"Колонки: {df.columns.tolist()}")
         return None
     
     result = df[['SKU', 'Расход, ₽']].copy()
@@ -144,7 +116,6 @@ def parse_ads(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     result = result[result['SKU'].notna()]
     result = result.groupby('SKU')['Расход_на_рекламу'].sum().reset_index()
     
-    print(f"Реклама распарсена: {len(result)} записей")
     return result
 
 
