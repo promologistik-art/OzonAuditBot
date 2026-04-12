@@ -3,33 +3,10 @@ from io import BytesIO
 from typing import Optional
 
 
-def identify_report(file_bytes: BytesIO) -> str:
-    file_bytes.seek(0)
-    xl = pd.ExcelFile(file_bytes)
-    
-    for sheet_name in xl.sheet_names:
-        file_bytes.seek(0)
-        df_raw = pd.read_excel(file_bytes, sheet_name=sheet_name, header=None)
-        all_text = ' '.join(df_raw.astype(str).values.flatten()).lower()
-        
-        if 'группа услуг' in all_text and 'тип начисления' in all_text:
-            return 'accruals'
-        elif 'доступно к продаже' in all_text and 'среднесуточные продажи' in all_text:
-            return 'stock'
-        elif 'инструмент' in all_text and 'расход' in all_text:
-            return 'ads'
-    
-    return 'unknown'
-
-
 def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
+    """Парсинг отчёта о начислениях — заголовки в строке 15 (индекс 14)."""
     file_bytes.seek(0)
-    xl = pd.ExcelFile(file_bytes)
-    sheet = xl.sheet_names[0]
-    
-    # В начислениях заголовки в строке 15 (индекс 14)
-    file_bytes.seek(0)
-    df = pd.read_excel(file_bytes, sheet_name=sheet, header=14)
+    df = pd.read_excel(file_bytes, sheet_name=0, header=14)
     df = df.dropna(how='all')
     
     df_goods = df[df['Артикул'].notna()].copy()
@@ -57,10 +34,10 @@ def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
 
 
 def parse_stock(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
+    """Парсинг отчёта об остатках — лист 'Товары', заголовки в строке 2 (индекс 1)."""
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
-    # Ищем лист "Товары"
     sheet = None
     for s in xl.sheet_names:
         if s == 'Товары':
@@ -69,13 +46,9 @@ def parse_stock(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     if sheet is None:
         return None
     
-    # Заголовки в строке 2 (индекс 1)
     file_bytes.seek(0)
     df = pd.read_excel(file_bytes, sheet_name=sheet, header=1)
     df = df.dropna(how='all')
-    
-    if 'Артикул' not in df.columns or 'Доступно к продаже' not in df.columns:
-        return None
     
     result = df[['Артикул', 'Доступно к продаже']].copy()
     result.columns = ['Артикул', 'Остаток']
@@ -87,11 +60,11 @@ def parse_stock(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     
     result = result[result['Артикул'].notna()]
     result = result.groupby('Артикул').agg({'Остаток': 'sum', 'Продаж_в_день': 'sum'}).reset_index()
-    
     return result
 
 
 def parse_ads(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
+    """Парсинг отчёта по рекламе — лист 'Statistics', заголовки в строке 2 (индекс 1)."""
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
@@ -103,52 +76,41 @@ def parse_ads(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     if sheet is None:
         return None
     
-    # Заголовки в строке 2 (индекс 1)
     file_bytes.seek(0)
     df = pd.read_excel(file_bytes, sheet_name=sheet, header=1)
     df = df.dropna(how='all')
-    
-    if 'SKU' not in df.columns or 'Расход, ₽' not in df.columns:
-        return None
     
     result = df[['SKU', 'Расход, ₽']].copy()
     result.columns = ['SKU', 'Расход_на_рекламу']
     result = result[result['SKU'].notna()]
     result = result.groupby('SKU')['Расход_на_рекламу'].sum().reset_index()
-    
     return result
 
 
-def merge_all(f1: BytesIO, f2: BytesIO, f3: BytesIO) -> Optional[pd.DataFrame]:
-    files = [f1, f2, f3]
-    reports = {'accruals': None, 'stock': None, 'ads': None}
+def merge_three(acc: BytesIO, stock: BytesIO, ads: BytesIO) -> Optional[pd.DataFrame]:
+    acc.seek(0)
+    stock.seek(0)
+    ads.seek(0)
     
-    for f in files:
-        f.seek(0)
-        t = identify_report(f)
-        f.seek(0)
-        if t == 'accruals' and reports['accruals'] is None:
-            reports['accruals'] = parse_accruals(f)
-        elif t == 'stock' and reports['stock'] is None:
-            reports['stock'] = parse_stock(f)
-        elif t == 'ads' and reports['ads'] is None:
-            reports['ads'] = parse_ads(f)
+    df_acc = parse_accruals(acc)
+    df_stock = parse_stock(stock)
+    df_ads = parse_ads(ads)
     
-    if reports['accruals'] is None:
+    if df_acc is None:
         return None
     
-    df = reports['accruals']
+    df = df_acc
     df['SKU'] = df['SKU'].astype(str)
     
-    if reports['stock'] is not None:
-        df = df.merge(reports['stock'], on='Артикул', how='left')
+    if df_stock is not None:
+        df = df.merge(df_stock, on='Артикул', how='left')
     else:
         df['Остаток'] = 0
         df['Продаж_в_день'] = 0
     
-    if reports['ads'] is not None:
-        reports['ads']['SKU'] = reports['ads']['SKU'].astype(str)
-        df = df.merge(reports['ads'], on='SKU', how='left')
+    if df_ads is not None:
+        df_ads['SKU'] = df_ads['SKU'].astype(str)
+        df = df.merge(df_ads, on='SKU', how='left')
     else:
         df['Расход_на_рекламу'] = 0
     
