@@ -4,10 +4,24 @@ from typing import Optional
 
 
 def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
-    """Парсинг отчёта о начислениях — заголовки в строке 15 (индекс 14)."""
+    """Парсинг отчёта о начислениях — заголовки в строке 3 (индекс 2)."""
     file_bytes.seek(0)
-    df = pd.read_excel(file_bytes, sheet_name=0, header=14)
+    df = pd.read_excel(file_bytes, sheet_name=0, header=2)
     df = df.dropna(how='all')
+    
+    # Проверяем, что колонка 'Артикул' существует
+    if 'Артикул' not in df.columns:
+        # Пробуем найти строку с 'Артикул' автоматически
+        file_bytes.seek(0)
+        df_raw = pd.read_excel(file_bytes, sheet_name=0, header=None)
+        header_row = 0
+        for i, row in df_raw.iterrows():
+            if 'Артикул' in row.values:
+                header_row = i
+                break
+        file_bytes.seek(0)
+        df = pd.read_excel(file_bytes, sheet_name=0, header=header_row)
+        df = df.dropna(how='all')
     
     df_goods = df[df['Артикул'].notna()].copy()
     df_extra = df[df['Артикул'].isna()].copy()
