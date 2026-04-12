@@ -4,6 +4,7 @@ from typing import Optional
 
 
 def identify_report(file_bytes: BytesIO) -> str:
+    """Определяет тип отчёта по ключевым словам во всех листах."""
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
@@ -14,7 +15,7 @@ def identify_report(file_bytes: BytesIO) -> str:
         
         if 'группа услуг' in all_text and 'тип начисления' in all_text:
             return 'accruals'
-        elif 'среднесуточные продажи' in all_text and 'ликвидность' in all_text:
+        elif 'доступно к продаже' in all_text and 'среднесуточные продажи' in all_text:
             return 'stock'
         elif 'инструмент' in all_text and 'расход' in all_text:
             return 'ads'
@@ -23,12 +24,15 @@ def identify_report(file_bytes: BytesIO) -> str:
 
 
 def find_header_row(file_bytes: BytesIO, sheet_name: str, keyword: str) -> int:
+    """Находит строку с заголовками по ключевому слову."""
     file_bytes.seek(0)
     df = pd.read_excel(file_bytes, sheet_name=sheet_name, header=None)
+    
     for i, row in df.iterrows():
-        if keyword in str(row.values):
+        row_str = ' '.join(str(v) for v in row.values if pd.notna(v))
+        if keyword in row_str:
             return i
-    return 0
+    return -1
 
 
 def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
@@ -37,7 +41,8 @@ def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     sheet = xl.sheet_names[0]
     
     header = find_header_row(file_bytes, sheet, 'Артикул')
-    if header == 0:
+    if header < 0:
+        print("Не найдена строка 'Артикул' в начислениях")
         return None
     
     file_bytes.seek(0)
@@ -47,11 +52,10 @@ def parse_accruals(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     df_goods = df[df['Артикул'].notna()].copy()
     df_extra = df[df['Артикул'].isna()].copy()
     
-    # Группируем по Артикул, но сохраняем SKU (цифровой)
     agg = df_goods.groupby('Артикул').agg({
         'Сумма итого, руб.': 'sum',
         'Название товара': 'first',
-        'SKU': 'first',  # <-- ВАЖНО: сохраняем цифровой SKU
+        'SKU': 'first',
         'Количество': 'sum' if 'Количество' in df_goods.columns else lambda x: 0
     }).reset_index()
     
@@ -73,29 +77,42 @@ def parse_stock(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
+    # Ищем лист "Товары"
     sheet = None
     for s in xl.sheet_names:
         if s == 'Товары':
             sheet = s
             break
     if sheet is None:
+        print("Лист 'Товары' не найден")
         return None
     
     header = find_header_row(file_bytes, sheet, 'Артикул')
-    if header == 0:
+    if header < 0:
+        print(f"Не найдена строка 'Артикул' в листе {sheet}")
         return None
     
     file_bytes.seek(0)
     df = pd.read_excel(file_bytes, sheet_name=sheet, header=header)
     df = df.dropna(how='all')
     
-    # Берём Артикул (строковый) и остатки
+    if 'Артикул' not in df.columns or 'Доступно к продаже' not in df.columns:
+        print(f"Нет нужных колонок в листе {sheet}")
+        print(f"Колонки: {df.columns.tolist()}")
+        return None
+    
     result = df[['Артикул', 'Доступно к продаже']].copy()
     result.columns = ['Артикул', 'Остаток']
-    result['Продаж_в_день'] = df['Среднесуточные продажи за 28 дней'] if 'Среднесуточные продажи за 28 дней' in df.columns else 0
+    
+    if 'Среднесуточные продажи за 28 дней' in df.columns:
+        result['Продаж_в_день'] = df['Среднесуточные продажи за 28 дней']
+    else:
+        result['Продаж_в_день'] = 0
     
     result = result[result['Артикул'].notna()]
     result = result.groupby('Артикул').agg({'Остаток': 'sum', 'Продаж_в_день': 'sum'}).reset_index()
+    
+    print(f"Остатки распарсены: {len(result)} товаров")
     return result
 
 
@@ -103,12 +120,14 @@ def parse_ads(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     file_bytes.seek(0)
     xl = pd.ExcelFile(file_bytes)
     
+    # Ищем лист Statistics
     sheet = None
     for s in xl.sheet_names:
         if s == 'Statistics':
             sheet = s
             break
     if sheet is None:
+        print("Лист 'Statistics' не найден")
         return None
     
     file_bytes.seek(0)
@@ -116,12 +135,16 @@ def parse_ads(file_bytes: BytesIO) -> Optional[pd.DataFrame]:
     df = df.dropna(how='all')
     
     if 'SKU' not in df.columns or 'Расход, ₽' not in df.columns:
+        print(f"Нет нужных колонок в листе {sheet}")
+        print(f"Колонки: {df.columns.tolist()}")
         return None
     
     result = df[['SKU', 'Расход, ₽']].copy()
     result.columns = ['SKU', 'Расход_на_рекламу']
     result = result[result['SKU'].notna()]
     result = result.groupby('SKU')['Расход_на_рекламу'].sum().reset_index()
+    
+    print(f"Реклама распарсена: {len(result)} записей")
     return result
 
 
@@ -144,18 +167,15 @@ def merge_all(f1: BytesIO, f2: BytesIO, f3: BytesIO) -> Optional[pd.DataFrame]:
         return None
     
     df = reports['accruals']
+    df['SKU'] = df['SKU'].astype(str)
     
-    # Сводим остатки по Артикулу (строковому)
     if reports['stock'] is not None:
         df = df.merge(reports['stock'], on='Артикул', how='left')
     else:
         df['Остаток'] = 0
         df['Продаж_в_день'] = 0
     
-    # Сводим рекламу по SKU (цифровому)
     if reports['ads'] is not None:
-        # Приводим SKU к строке для надёжности
-        df['SKU'] = df['SKU'].astype(str)
         reports['ads']['SKU'] = reports['ads']['SKU'].astype(str)
         df = df.merge(reports['ads'], on='SKU', how='left')
     else:
